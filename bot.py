@@ -4,6 +4,7 @@ import os
 import sys
 import asyncio
 import logging
+import random
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -16,6 +17,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 from claude_agent import ExpenseAgent
 from sheets_writer import SheetsWriter
+from off_topic_responses import OFF_TOPIC_RESPONSES
 
 # Load environment variables from .env file
 load_dotenv()
@@ -99,6 +101,13 @@ class ExpenseBot:
             history.append({"role": "user", "content": user_message})
 
             expenses, response_text = self.agent.parse_expense(history)
+
+            if any(expense.get("off_topic") for expense in expenses):
+                # Off-topic input (or a prompt-injection attempt) is a dead
+                # end, not a pending clarification - start fresh next time.
+                self.conversations.pop(chat_id, None)
+                await update.message.reply_text(random.choice(OFF_TOPIC_RESPONSES))
+                return
 
             is_clarification = any(
                 expense.get("error") and expense.get("message") not in self.INTERNAL_ERROR_MESSAGES
