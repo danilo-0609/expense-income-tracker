@@ -21,6 +21,7 @@ class SheetsWriter:
 
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
     HEADERS = ["Fecha", "Categoría", "Descripción", "Monto (COP)", "Notas"]
+    SHEET_NAME_PREFIXES = {"gasto": "", "ingreso": "Ingresos - "}
     MONTH_NAMES = {
         1: "January", 2: "February", 3: "March", 4: "April",
         5: "May", 6: "June", 7: "July", 8: "August",
@@ -47,24 +48,26 @@ class SheetsWriter:
             logger.error(f"Failed to connect to Google Sheets: {e}")
             raise
 
-    def _get_sheet_name(self, date_str: str) -> str:
+    def _get_sheet_name(self, date_str: str, entry_type: str = "gasto") -> str:
         """
         Convert date string to sheet name.
 
         Args:
             date_str: Date in format "YYYY-MM-DD"
+            entry_type: "gasto" (default) or "ingreso" - selects the sheet prefix
 
         Returns:
-            Sheet name like "August/2026"
+            Sheet name like "August/2026" or "Ingresos - August/2026"
         """
+        prefix = self.SHEET_NAME_PREFIXES.get(entry_type, "")
         try:
             date_obj = datetime.strptime(date_str, "%Y-%m-%d")
             month_name = self.MONTH_NAMES[date_obj.month]
             year = date_obj.year
-            return f"{month_name}/{year}"
+            return f"{prefix}{month_name}/{year}"
         except (ValueError, KeyError):
             logger.error(f"Invalid date format: {date_str}. Using default sheet.")
-            return "Other"
+            return f"{prefix}Other"
 
     def _get_or_create_sheet(self, sheet_name: str) -> gspread.Worksheet:
         """
@@ -111,9 +114,10 @@ class SheetsWriter:
             return False
 
         try:
-            # Get the sheet for this expense's month
+            # Get the sheet for this entry's month, routed by type (gasto/ingreso)
             date_str = expense.get("date", "")
-            sheet_name = self._get_sheet_name(date_str)
+            entry_type = expense.get("type", "gasto")
+            sheet_name = self._get_sheet_name(date_str, entry_type)
             worksheet = self._get_or_create_sheet(sheet_name)
 
             # Prepare row data

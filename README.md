@@ -1,12 +1,12 @@
 # Expense Tracker Bot
 
-A Telegram bot that automatically logs expenses to a Google Sheet using Claude AI for intelligent categorization.
+A Telegram bot that automatically logs expenses **and income** to a Google Sheet using Claude AI for intelligent categorization.
 
 **Features:**
-- 📱 Log expenses via Telegram in natural language (Spanish)
-- 🤖 Claude AI automatically categorizes and parses expenses
-- 💬 Asks follow-up questions when info is missing, and remembers your answers (multi-turn clarification)
-- 📊 Saves directly to Google Sheets, organized into one tab per month (e.g. `August/2026`)
+- 📱 Log expenses or income via Telegram in natural language (Spanish) — Claude decides which one each message is
+- 🤖 Claude AI automatically categorizes and parses expenses and income
+- 💬 Asks follow-up questions when info is missing (including whether a message is an expense or income), and remembers your answers (multi-turn clarification)
+- 📊 Saves directly to Google Sheets, organized into one tab per month (e.g. `August/2026` for expenses, `Ingresos - August/2026` for income)
 - 💾 No database needed — uses Google Sheets as storage
 - 🔄 Polling-based bot (no webhooks required)
 
@@ -58,7 +58,7 @@ Skip this for now if you want to test the bot without Sheets integration.
 
 **To enable Sheets integration:**
 
-1. Create a new Google Sheet with columns: `Fecha | Categoría | Descripción | Monto (COP) | Notas`
+1. Create a new Google Sheet. Expense and income rows use the same column shape: `Fecha | Categoría | Descripción | Monto (COP) | Notas`. Monthly tabs are created automatically — expenses in `<Month>/<Year>` (e.g. `August/2026`), income in `Ingresos - <Month>/<Year>` (e.g. `Ingresos - August/2026`).
 2. Create a Google Cloud project:
    - Go to [Google Cloud Console](https://console.cloud.google.com/)
    - Create a new project
@@ -97,10 +97,12 @@ With Telegram bot token and Claude API key:
 python main.py
 ```
 
-The bot will start polling for messages. Send it expense entries like:
+The bot will start polling for messages. Send it expense or income entries like:
 - `"Almuerzo en Starbucks, 25000"`
 - `"Uber al trabajo, 28500 ayer"`
 - `"Gasté 80000 en gasolina hace 2 días"`
+- `"Me pagaron el salario, 3000000"`
+- `"Rendimientos de la cuenta, 12000"`
 
 ### Phase 3: Test Sheets Integration (Optional)
 
@@ -127,7 +129,7 @@ expense-tracker/
 ├── .env.example                     # Environment variables template
 ├── .env                             # Your actual environment variables (NEVER COMMIT)
 ├── service_account.json             # Google credentials (NEVER COMMIT)
-├── expense_tracker_design_plan.md   # Design & architecture
+├── specs/                           # Design plans (expense + income tracking)
 └── README.md                        # This file
 ```
 
@@ -153,11 +155,12 @@ Optional (for Sheets integration):
    ```
 
 2. **Bot forwards the conversation to Claude API:**
-   - Full chat history so far (not just the latest message) + categorization system prompt
+   - Full chat history so far (not just the latest message) + a single unified system prompt that handles both expenses and income
 
-3. **Claude responds with JSON:**
+3. **Claude decides if it's an expense or income and responds with JSON**, including a `"type"` field (`"gasto"` or `"ingreso"`):
    ```json
    {
+     "type": "gasto",
      "category": "Alimentación",
      "amount": 25000,
      "description": "Almuerzo en Starbucks",
@@ -166,9 +169,22 @@ Optional (for Sheets integration):
      "confirmation": "✅ Gasto guardado: Alimentación - $25,000 COP - Almuerzo en Starbucks"
    }
    ```
+   Income entries look the same, with income categories and `"type": "ingreso"`:
+   ```json
+   {
+     "type": "ingreso",
+     "category": "Salario",
+     "amount": 3000000,
+     "description": "Salario de agosto",
+     "date": "2026-08-09",
+     "notes": "",
+     "confirmation": "✅ Ingreso guardado: Salario - $3,000,000 COP - Salario de agosto"
+   }
+   ```
 
-4. **Bot writes to the correct monthly sheet tab** (e.g. `July/2026`):
-   - Appends row: `2026-07-25 | Alimentación | Almuerzo en Starbucks | 25000 | `
+4. **Bot writes to the correct monthly sheet tab based on `"type"`:**
+   - Expense → `July/2026`: appends row `2026-07-25 | Alimentación | Almuerzo en Starbucks | 25000 | `
+   - Income → `Ingresos - August/2026`: appends row `2026-08-09 | Salario | Salario de agosto | 3000000 | `
 
 5. **Bot confirms to user:**
    ```
@@ -186,7 +202,16 @@ User: "6000"
 Bot:  "✅ Gasto guardado: Salud - $6,000 COP - Refresco gimnasio"
 ```
 
-Once an expense is resolved (saved, or a hard error occurs), the bot forgets that thread — the next message you send starts a brand-new expense from scratch.
+This also covers ambiguous intent — if Claude can't tell whether a message is an expense or income, it asks instead of guessing:
+
+```
+User: "Recibí 50000"
+Bot:  "¿Este movimiento es un ingreso o un gasto?"
+User: "Ingreso, me lo regalaron"
+Bot:  "✅ Ingreso guardado: Otros ingresos - $50,000 COP - Regalo"
+```
+
+Once an entry is resolved (saved, or a hard error occurs), the bot forgets that thread — the next message you send starts a brand-new expense or income entry from scratch.
 
 ---
 
@@ -229,6 +254,46 @@ Examples:
 | **Salud** | Pharmacy, doctor, gym, medicine |
 | **Servicios** | Internet, electricity, phone, water |
 | **Otros** | Everything else (fallback) |
+
+---
+
+## Income Format
+
+Same format as expenses — Claude tells expenses and income apart from context, no special prefix or command needed.
+
+### Simple Format
+```
+[Description], [Amount]
+```
+Examples:
+- `"Me pagaron el salario, 3000000"`
+- `"Rendimientos de la cuenta, 12000"`
+
+### With Date
+```
+[Description], [Amount] [Date]
+```
+Examples:
+- `"Recibí mi pago salarial el 1 de agosto, 3000000"`
+
+### Multiple Income Entries
+```
+[Desc1], [Amount1], [Desc2], [Amount2]
+```
+Examples:
+- `"Salario 3000000, bono 200000"` (splits into 2 rows)
+
+Income logging is manual only — there's no automatic tracking of interest/yield accrual from a bank account. When you check your balance and want to record what you earned, just send it as a `Rendimientos` income entry (e.g. `"Rendimientos de la cuenta, 12000"`).
+
+---
+
+## Income Categories
+
+| Category | Examples |
+|----------|----------|
+| **Salario** | Monthly/biweekly salary payments |
+| **Rendimientos** | Yield/interest from a savings or deposit account (manually reported) |
+| **Otros ingresos** | Freelance income, gifts, refunds, everything else (fallback) |
 
 ---
 
@@ -276,13 +341,13 @@ These should be in `.gitignore`. Store them securely:
 Run `python main.py` on your machine. Bot will poll Telegram continuously.
 
 ### Azure App Service (Production)
-See `expense_tracker_design_plan.md` for deployment instructions.
+See `specs/expense_tracker_design_plan.md` for deployment instructions.
 
 ---
 
 ## Future Features
 
-- Monthly expense summaries
+- Monthly expense/income summaries
 - Budget alerts per category
 - Recurring expense templates
 - Export to PDF
@@ -313,8 +378,8 @@ python main.py
 
 ## References
 
-- **Design Plan:** See `expense_tracker_design_plan.md`
-- **Original Plan:** See `expense_tracker_plan.md`
+- **Expense Design Plan:** See `specs/expense_tracker_design_plan.md`
+- **Income Design Plan:** See `specs/income_tracker_design_plan.md`
 - **Telegram Bot API:** [python-telegram-bot docs](https://python-telegram-bot.readthedocs.io/)
 - **Claude API:** [Anthropic docs](https://docs.anthropic.com/)
 - **Google Sheets API:** [Google docs](https://developers.google.com/sheets)

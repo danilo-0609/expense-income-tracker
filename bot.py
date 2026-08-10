@@ -55,11 +55,12 @@ class ExpenseBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
         await update.message.reply_text(
-            "¡Hola! 👋 Soy tu asistente de gastos.\n\n"
-            "Envíame un gasto en español y lo registraré automáticamente. Ejemplos:\n"
+            "¡Hola! 👋 Soy tu asistente de gastos e ingresos.\n\n"
+            "Envíame un gasto o un ingreso en español y lo registraré automáticamente. Ejemplos:\n"
             "- 'Almuerzo en Starbucks, 25000'\n"
             "- 'Uber al trabajo, 28500'\n"
-            "- 'Gasté 80000 en gasolina ayer'\n\n"
+            "- 'Me pagaron el salario, 3000000'\n"
+            "- 'Rendimientos de la cuenta, 12000'\n\n"
             "Usa /help para más información."
         )
 
@@ -67,18 +68,22 @@ class ExpenseBot:
         """Handle /help command."""
         await update.message.reply_text(
             "📝 **Cómo usar este bot:**\n\n"
-            "Escribe un gasto en español con el formato:\n"
+            "Escribe un gasto o un ingreso en español con el formato:\n"
             "`<descripción>, <monto>` o `<descripción>, <monto>, <fecha>`\n\n"
-            "**Ejemplos:**\n"
+            "**Ejemplos de gastos:**\n"
             "- 'Almuerzo en Starbucks, 25000'\n"
             "- 'Café, 15000 ayer'\n"
             "- 'Gasolina, 80000 hace 2 días'\n"
             "- 'Almuerzo 20000, Uber 15000' (múltiples gastos)\n"
             "- 'Crema para mamá, 30000 el 24 de julio'\n\n"
+            "**Ejemplos de ingresos:**\n"
+            "- 'Me pagaron el salario, 3000000'\n"
+            "- 'Rendimientos de la cuenta, 12000'\n"
+            "- 'Recibí mi pago salarial el 1 de agosto, 3000000'\n\n"
             "El bot:\n"
-            "1. Identifica la categoría del gasto\n"
+            "1. Identifica si es un gasto o un ingreso, y su categoría\n"
             "2. Extrae la cantidad y la fecha\n"
-            "3. Guarda el gasto en la hoja de cálculo\n\n"
+            "3. Guarda el movimiento en la hoja de cálculo correspondiente\n\n"
             "Si hay alguna ambigüedad, se guardará con una nota para que revises después."
         )
 

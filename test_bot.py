@@ -65,6 +65,7 @@ async def test_off_topic_message_does_not_write_to_sheets():
 async def test_regular_expense_still_saved_and_written_to_sheets():
     bot = make_bot()
     expense = {
+        "type": "gasto",
         "category": "Alimentación",
         "amount": 25000,
         "description": "Almuerzo",
@@ -79,3 +80,38 @@ async def test_regular_expense_still_saved_and_written_to_sheets():
 
     bot.sheets_writer.write_expense.assert_called_once_with(expense)
     update.message.reply_text.assert_awaited_once_with(expense["confirmation"])
+
+
+@pytest.mark.asyncio
+async def test_income_message_saved_and_written_to_sheets():
+    bot = make_bot()
+    income = {
+        "type": "ingreso",
+        "category": "Salario",
+        "amount": 3000000,
+        "description": "Salario de agosto",
+        "date": "2026-08-09",
+        "notes": "",
+        "confirmation": "✅ Ingreso guardado: Salario - $3,000,000 COP - Salario de agosto",
+    }
+    bot.agent.parse_expense = MagicMock(return_value=([income], "raw"))
+    update = make_update(text="Me pagaron el salario, 3000000")
+
+    await bot.handle_message(update, MagicMock())
+
+    bot.sheets_writer.write_expense.assert_called_once_with(income)
+    update.message.reply_text.assert_awaited_once_with(income["confirmation"])
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_type_message_asks_for_clarification():
+    bot = make_bot()
+    clarification = {"error": True, "message": "¿Este movimiento es un ingreso o un gasto?"}
+    bot.agent.parse_expense = MagicMock(return_value=([clarification], "raw"))
+    update = make_update(chat_id=7, text="Recibí 50000")
+
+    await bot.handle_message(update, MagicMock())
+
+    update.message.reply_text.assert_awaited_once_with(clarification["message"])
+    bot.sheets_writer.write_expense.assert_not_called()
+    assert 7 in bot.conversations
