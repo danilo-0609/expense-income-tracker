@@ -36,9 +36,13 @@ class ToolCallingExpenseBot:
 
     def __init__(self, bot_token: str, claude_api_key: str, sheets_writer: SheetsWriter = None):
         self.agent = ToolCallingExpenseAgent(claude_api_key, sheets_writer)
-        # Per-chat conversation history, so follow-up replies to a
-        # clarification question (e.g. a bare amount) have context.
-        self.conversations: dict[int, list[dict]] = {}
+        # Per-chat pending conversation state, so follow-up replies to a
+        # clarification question (e.g. a bare amount) have context. Each
+        # entry is {"history": [...], "pending_tool_use_id": str | None} -
+        # pending_tool_use_id must be threaded back so the follow-up reply is
+        # sent as that ask_clarification call's tool_result, per Anthropic's
+        # requirement that every tool_use be immediately followed by one.
+        self.conversations: dict[int, dict] = {}
         request = HTTPXRequest(connect_timeout=20, read_timeout=20)
         self.app = Application.builder().token(bot_token).request(request).build()
 
@@ -83,10 +87,10 @@ class ToolCallingExpenseBot:
         logger.info(f"Received message from {update.effective_user.id}: {user_message}")
 
         try:
-            history = self.conversations.get(chat_id, [])
-            history = history + [{"role": "user", "content": user_message}]
-
-            result = self.agent.handle_message(history)
+            pending = self.conversations.get(chat_id, {})
+            result = self.agent.handle_message(
+                pending.get("history", []), user_message, pending.get("pending_tool_use_id")
+            )
 
             if result.kind == "off_topic":
                 self.conversations.pop(chat_id, None)
@@ -94,7 +98,10 @@ class ToolCallingExpenseBot:
                 return
 
             if result.kind == "clarification":
-                self.conversations[chat_id] = result.history
+                self.conversations[chat_id] = {
+                    "history": result.history,
+                    "pending_tool_use_id": result.pending_tool_use_id,
+                }
                 await update.message.reply_text(result.text)
                 return
 

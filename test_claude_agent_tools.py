@@ -46,11 +46,12 @@ def test_save_entries_writes_each_entry_and_returns_saved_result():
         response(text_block("✅ Gasto guardado: Alimentación - $25,000 COP - Almuerzo")),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "Almuerzo, 25000"}])
+    result = agent.handle_message([], "Almuerzo, 25000")
 
     assert isinstance(result, AgentTurnResult)
     assert result.kind == "saved"
     assert result.text == "✅ Gasto guardado: Alimentación - $25,000 COP - Almuerzo"
+    assert result.pending_tool_use_id is None
     sheets_writer.write_expense.assert_called_once_with(entry)
     assert agent.client.messages.create.call_count == 2
 
@@ -65,7 +66,7 @@ def test_save_entries_batches_multiple_entries_in_one_tool_call():
         response(text_block("✅ Gasto guardado x2")),
     ]
 
-    agent.handle_message([{"role": "user", "content": "Almuerzo 20000, Uber al trabajo 15000"}])
+    agent.handle_message([], "Almuerzo 20000, Uber al trabajo 15000")
 
     assert sheets_writer.write_expense.call_count == 2
     # One save_entries call plus one confirmation call - never one Claude call per entry.
@@ -82,7 +83,7 @@ def test_save_entries_partial_failure_reports_per_row_breakdown_to_claude():
         response(text_block("✅ Gasto guardado: Almuerzo\n❌ No se pudo guardar: Uber al trabajo")),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "..."}])
+    result = agent.handle_message([], "...")
 
     second_call_messages = agent.client.messages.create.call_args_list[1].kwargs["messages"]
     tool_result_message = second_call_messages[-1]
@@ -103,7 +104,7 @@ def test_save_entries_without_sheets_writer_reports_success_without_writing():
         response(text_block("✅ Gasto guardado")),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "Almuerzo, 25000"}])
+    result = agent.handle_message([], "Almuerzo, 25000")
 
     assert result.kind == "saved"
 
@@ -112,13 +113,14 @@ def test_ask_clarification_returns_question_without_writing_to_sheets():
     sheets_writer = MagicMock()
     agent = make_agent(sheets_writer)
     agent.client.messages.create.side_effect = [
-        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"})),
+        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"}, tool_id="toolu_q1")),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "Café en Starbucks ayer"}])
+    result = agent.handle_message([], "Café en Starbucks ayer")
 
     assert result.kind == "clarification"
     assert result.text == "¿Cuál fue el monto del gasto?"
+    assert result.pending_tool_use_id == "toolu_q1"
     sheets_writer.write_expense.assert_not_called()
     # No second turn needed - the clarification question IS the reply.
     assert agent.client.messages.create.call_count == 1
@@ -134,7 +136,7 @@ def test_missing_tool_use_returns_error_kind_not_off_topic():
         response(text_block("no sé qué hacer con esto")),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "algo raro"}])
+    result = agent.handle_message([], "algo raro")
 
     assert result.kind == "error"
     sheets_writer.write_expense.assert_not_called()
@@ -147,7 +149,7 @@ def test_flag_off_topic_returns_off_topic_kind_without_writing_to_sheets():
         response(tool_use_block("flag_off_topic", {})),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "¿Cuál es la población de Brasil?"}])
+    result = agent.handle_message([], "¿Cuál es la población de Brasil?")
 
     assert result.kind == "off_topic"
     sheets_writer.write_expense.assert_not_called()
@@ -160,9 +162,34 @@ def test_clarification_history_includes_assistant_turn_for_followup_context():
         response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"})),
     ]
 
-    result = agent.handle_message([{"role": "user", "content": "Café en Starbucks ayer"}])
+    result = agent.handle_message([], "Café en Starbucks ayer")
 
     assert result.history[-1]["role"] == "assistant"
+
+
+def test_followup_answering_a_pending_clarification_is_sent_as_a_tool_result():
+    """Anthropic requires every tool_use block to be immediately followed by a
+    tool_result block in the next message - the user's answer to
+    ask_clarification must be wrapped as the tool_result for that tool_use id,
+    not a fresh plain-text user turn, or the next API call is rejected."""
+    agent = make_agent()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"}, tool_id="toolu_q1")),
+    ]
+    first = agent.handle_message([], "Café en Starbucks ayer")
+
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("save_entries", {"entries": [make_entry("Café en Starbucks", amount=6000)]})),
+        response(text_block("✅ Gasto guardado: Alimentación - $6,000 COP - Café en Starbucks")),
+    ]
+    agent.handle_message(first.history, "6000", pending_tool_use_id=first.pending_tool_use_id)
+
+    second_call_messages = agent.client.messages.create.call_args_list[1].kwargs["messages"]
+    followup_message = second_call_messages[-1]
+    assert followup_message["role"] == "user"
+    assert followup_message["content"][0]["type"] == "tool_result"
+    assert followup_message["content"][0]["tool_use_id"] == "toolu_q1"
+    assert followup_message["content"][0]["content"] == "6000"
 
 
 def test_multiturn_clarification_followup_resolves_into_save_entries():
@@ -170,17 +197,28 @@ def test_multiturn_clarification_followup_resolves_into_save_entries():
     sheets_writer.write_expense.return_value = True
     agent = make_agent(sheets_writer)
     agent.client.messages.create.side_effect = [
-        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"})),
+        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"}, tool_id="toolu_q1")),
     ]
-    first = agent.handle_message([{"role": "user", "content": "Café en Starbucks ayer"}])
+    first = agent.handle_message([], "Café en Starbucks ayer")
 
     entry = make_entry("Café en Starbucks", amount=6000)
     agent.client.messages.create.side_effect = [
         response(tool_use_block("save_entries", {"entries": [entry]})),
         response(text_block("✅ Gasto guardado: Alimentación - $6,000 COP - Café en Starbucks")),
     ]
-    history = first.history + [{"role": "user", "content": "6000"}]
-    second = agent.handle_message(history)
+    second = agent.handle_message(first.history, "6000", pending_tool_use_id=first.pending_tool_use_id)
 
     assert second.kind == "saved"
     sheets_writer.write_expense.assert_called_once_with(entry)
+
+
+def test_plain_followup_without_pending_clarification_is_sent_as_normal_text():
+    agent = make_agent()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("flag_off_topic", {})),
+    ]
+
+    agent.handle_message([], "hola")
+
+    sent_messages = agent.client.messages.create.call_args.kwargs["messages"]
+    assert sent_messages[-1] == {"role": "user", "content": "hola"}

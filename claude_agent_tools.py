@@ -99,6 +99,7 @@ class AgentTurnResult:
     kind: Literal["saved", "clarification", "off_topic", "error"]
     text: str | None
     history: list[dict]
+    pending_tool_use_id: str | None = None
 
 
 class ToolCallingExpenseAgent:
@@ -108,7 +109,32 @@ class ToolCallingExpenseAgent:
         self.client = Anthropic(api_key=api_key)
         self.sheets_writer = sheets_writer
 
-    def handle_message(self, history: list[dict]) -> AgentTurnResult:
+    def handle_message(
+        self, history: list[dict], user_message: str, pending_tool_use_id: str | None = None
+    ) -> AgentTurnResult:
+        """Handle one incoming user message.
+
+        Anthropic requires every tool_use block to be immediately followed by
+        a tool_result block in the next message. When pending_tool_use_id is
+        set (the previous turn called ask_clarification), user_message is the
+        user's answer to that question, so it's wrapped as the tool_result
+        for that call rather than sent as a fresh plain-text turn.
+        """
+        if pending_tool_use_id:
+            new_turn = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": pending_tool_use_id,
+                        "content": user_message,
+                    }
+                ],
+            }
+        else:
+            new_turn = {"role": "user", "content": user_message}
+        history = history + [new_turn]
+
         response = self._create_message(history)
         tool_use = next((block for block in response.content if block.type == "tool_use"), None)
 
@@ -124,7 +150,12 @@ class ToolCallingExpenseAgent:
         logger.info(f"Tool called: {tool_use.name}")
 
         if tool_use.name == "ask_clarification":
-            return AgentTurnResult(kind="clarification", text=tool_use.input["question"], history=history)
+            return AgentTurnResult(
+                kind="clarification",
+                text=tool_use.input["question"],
+                history=history,
+                pending_tool_use_id=tool_use.id,
+            )
 
         if tool_use.name == "flag_off_topic":
             return AgentTurnResult(kind="off_topic", text=None, history=history)
