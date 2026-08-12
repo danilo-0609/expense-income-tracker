@@ -98,6 +98,13 @@ class ToolCallingExpenseBot:
                 await update.message.reply_text(result.text)
                 return
 
+            if result.kind == "error":
+                # Internal failure (e.g. Claude didn't call a tool) - not a
+                # pending clarification, start fresh next time.
+                self.conversations.pop(chat_id, None)
+                await update.message.reply_text(result.text)
+                return
+
             self.conversations.pop(chat_id, None)
             await update.message.reply_text(result.text)
             logger.info(f"Turn resolved for chat {chat_id}: {result.text}")

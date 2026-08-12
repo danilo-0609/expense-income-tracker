@@ -9,6 +9,7 @@ Claude for a second turn that composes the final confirmation.
 import json
 import logging
 from dataclasses import dataclass
+from typing import Literal
 from dotenv import load_dotenv
 from anthropic import Anthropic
 from system_prompt_tools import SYSTEM_PROMPT_TOOLS
@@ -81,20 +82,21 @@ FLAG_OFF_TOPIC_TOOL = {
 TOOLS = [SAVE_ENTRIES_TOOL, ASK_CLARIFICATION_TOOL, FLAG_OFF_TOPIC_TOOL]
 
 SHEETS_WRITE_ERROR = "error al escribir en la hoja de cálculo"
+NO_TOOL_CALL_ERROR = "❌ Error al procesar el mensaje. Por favor, intenta de nuevo."
 
 
 @dataclass
 class AgentTurnResult:
     """Outcome of one handle_message call.
 
-    kind: "saved" | "clarification" | "off_topic"
+    kind: "saved" | "clarification" | "off_topic" | "error"
     text: the Spanish text to relay to the user (None for off_topic - the
         caller supplies its own canned reply).
     history: conversation history including any new assistant/tool turns, for
         the caller to persist across multi-turn clarification follow-ups.
     """
 
-    kind: str
+    kind: Literal["saved", "clarification", "off_topic", "error"]
     text: str | None
     history: list[dict]
 
@@ -111,8 +113,12 @@ class ToolCallingExpenseAgent:
         tool_use = next((block for block in response.content if block.type == "tool_use"), None)
 
         if tool_use is None:
-            text = "".join(block.text for block in response.content if block.type == "text").strip()
-            return AgentTurnResult(kind="off_topic", text=text or None, history=history)
+            # Claude is instructed to always call exactly one tool; a plain-text
+            # reply here is an internal failure, not a real off_topic
+            # classification (only flag_off_topic produces that).
+            raw_text = "".join(block.text for block in response.content if block.type == "text").strip()
+            logger.error(f"Claude responded without a tool call. Raw text: {raw_text}")
+            return AgentTurnResult(kind="error", text=NO_TOOL_CALL_ERROR, history=history)
 
         history = history + [{"role": "assistant", "content": response.content}]
 

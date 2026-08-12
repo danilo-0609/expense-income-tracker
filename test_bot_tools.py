@@ -107,6 +107,20 @@ async def test_multiturn_followup_passes_prior_history_to_agent():
 
 
 @pytest.mark.asyncio
+async def test_error_result_is_relayed_and_resets_conversation():
+    bot = make_bot()
+    error_text = "❌ Error al procesar el mensaje. Por favor, intenta de nuevo."
+    bot.agent.handle_message.return_value = AgentTurnResult(kind="error", text=error_text, history=[])
+    update = make_update(chat_id=11, text="algo raro")
+    bot.conversations[11] = [{"role": "user", "content": "previo"}]
+
+    await bot.handle_message(update, MagicMock())
+
+    update.message.reply_text.assert_awaited_once_with(error_text)
+    assert 11 not in bot.conversations
+
+
+@pytest.mark.asyncio
 async def test_agent_exception_sends_generic_error_and_resets_conversation():
     bot = make_bot()
     bot.agent.handle_message.side_effect = RuntimeError("boom")

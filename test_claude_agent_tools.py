@@ -124,6 +124,22 @@ def test_ask_clarification_returns_question_without_writing_to_sheets():
     assert agent.client.messages.create.call_count == 1
 
 
+def test_missing_tool_use_returns_error_kind_not_off_topic():
+    """Claude is instructed to always call exactly one tool; if it doesn't,
+    that's an internal failure to surface as an error, not a real off_topic
+    classification (which only flag_off_topic should produce)."""
+    sheets_writer = MagicMock()
+    agent = make_agent(sheets_writer)
+    agent.client.messages.create.side_effect = [
+        response(text_block("no sé qué hacer con esto")),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "algo raro"}])
+
+    assert result.kind == "error"
+    sheets_writer.write_expense.assert_not_called()
+
+
 def test_flag_off_topic_returns_off_topic_kind_without_writing_to_sheets():
     sheets_writer = MagicMock()
     agent = make_agent(sheets_writer)
