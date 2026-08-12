@@ -121,6 +121,7 @@ class ToolCallingExpenseAgent:
             return AgentTurnResult(kind="error", text=NO_TOOL_CALL_ERROR, history=history)
 
         history = history + [{"role": "assistant", "content": response.content}]
+        logger.info(f"Tool called: {tool_use.name}")
 
         if tool_use.name == "ask_clarification":
             return AgentTurnResult(kind="clarification", text=tool_use.input["question"], history=history)
