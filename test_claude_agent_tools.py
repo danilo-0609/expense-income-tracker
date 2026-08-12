@@ -1,0 +1,170 @@
+"""Tests for ToolCallingExpenseAgent's tool dispatch and agentic loop."""
+
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from claude_agent_tools import AgentTurnResult, ToolCallingExpenseAgent
+
+
+def text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def tool_use_block(name, tool_input, tool_id="toolu_1"):
+    return SimpleNamespace(type="tool_use", id=tool_id, name=name, input=tool_input)
+
+
+def response(*blocks):
+    return SimpleNamespace(content=list(blocks))
+
+
+def make_agent(sheets_writer=None):
+    agent = ToolCallingExpenseAgent("fake-claude-key", sheets_writer=sheets_writer)
+    agent.client = MagicMock()
+    return agent
+
+
+def make_entry(description="Almuerzo", entry_type="gasto", category="Alimentación", amount=25000):
+    return {
+        "type": entry_type,
+        "category": category,
+        "amount": amount,
+        "description": description,
+        "date": "2026-08-11",
+        "notes": "",
+    }
+
+
+def test_save_entries_writes_each_entry_and_returns_saved_result():
+    sheets_writer = MagicMock()
+    sheets_writer.write_expense.return_value = True
+    agent = make_agent(sheets_writer)
+    entry = make_entry()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("save_entries", {"entries": [entry]})),
+        response(text_block("✅ Gasto guardado: Alimentación - $25,000 COP - Almuerzo")),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "Almuerzo, 25000"}])
+
+    assert isinstance(result, AgentTurnResult)
+    assert result.kind == "saved"
+    assert result.text == "✅ Gasto guardado: Alimentación - $25,000 COP - Almuerzo"
+    sheets_writer.write_expense.assert_called_once_with(entry)
+    assert agent.client.messages.create.call_count == 2
+
+
+def test_save_entries_batches_multiple_entries_in_one_tool_call():
+    sheets_writer = MagicMock()
+    sheets_writer.write_expense.return_value = True
+    agent = make_agent(sheets_writer)
+    entries = [make_entry("Almuerzo", amount=20000), make_entry("Uber al trabajo", amount=15000, category="Transporte")]
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("save_entries", {"entries": entries})),
+        response(text_block("✅ Gasto guardado x2")),
+    ]
+
+    agent.handle_message([{"role": "user", "content": "Almuerzo 20000, Uber al trabajo 15000"}])
+
+    assert sheets_writer.write_expense.call_count == 2
+    # One save_entries call plus one confirmation call - never one Claude call per entry.
+    assert agent.client.messages.create.call_count == 2
+
+
+def test_save_entries_partial_failure_reports_per_row_breakdown_to_claude():
+    sheets_writer = MagicMock()
+    sheets_writer.write_expense.side_effect = [True, False]
+    agent = make_agent(sheets_writer)
+    entries = [make_entry("Almuerzo"), make_entry("Uber al trabajo", category="Transporte")]
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("save_entries", {"entries": entries})),
+        response(text_block("✅ Gasto guardado: Almuerzo\n❌ No se pudo guardar: Uber al trabajo")),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "..."}])
+
+    second_call_messages = agent.client.messages.create.call_args_list[1].kwargs["messages"]
+    tool_result_message = second_call_messages[-1]
+    tool_result_payload = json.loads(tool_result_message["content"][0]["content"])
+    results = tool_result_payload["results"]
+    assert results[0] == {"description": "Almuerzo", "success": True}
+    assert results[1]["description"] == "Uber al trabajo"
+    assert results[1]["success"] is False
+    assert "error" in results[1]
+    assert result.kind == "saved"
+
+
+def test_save_entries_without_sheets_writer_reports_success_without_writing():
+    agent = make_agent(sheets_writer=None)
+    entry = make_entry()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("save_entries", {"entries": [entry]})),
+        response(text_block("✅ Gasto guardado")),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "Almuerzo, 25000"}])
+
+    assert result.kind == "saved"
+
+
+def test_ask_clarification_returns_question_without_writing_to_sheets():
+    sheets_writer = MagicMock()
+    agent = make_agent(sheets_writer)
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"})),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "Café en Starbucks ayer"}])
+
+    assert result.kind == "clarification"
+    assert result.text == "¿Cuál fue el monto del gasto?"
+    sheets_writer.write_expense.assert_not_called()
+    # No second turn needed - the clarification question IS the reply.
+    assert agent.client.messages.create.call_count == 1
+
+
+def test_flag_off_topic_returns_off_topic_kind_without_writing_to_sheets():
+    sheets_writer = MagicMock()
+    agent = make_agent(sheets_writer)
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("flag_off_topic", {})),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "¿Cuál es la población de Brasil?"}])
+
+    assert result.kind == "off_topic"
+    sheets_writer.write_expense.assert_not_called()
+    assert agent.client.messages.create.call_count == 1
+
+
+def test_clarification_history_includes_assistant_turn_for_followup_context():
+    agent = make_agent()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"})),
+    ]
+
+    result = agent.handle_message([{"role": "user", "content": "Café en Starbucks ayer"}])
+
+    assert result.history[-1]["role"] == "assistant"
+
+
+def test_multiturn_clarification_followup_resolves_into_save_entries():
+    sheets_writer = MagicMock()
+    sheets_writer.write_expense.return_value = True
+    agent = make_agent(sheets_writer)
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("ask_clarification", {"question": "¿Cuál fue el monto del gasto?"})),
+    ]
+    first = agent.handle_message([{"role": "user", "content": "Café en Starbucks ayer"}])
+
+    entry = make_entry("Café en Starbucks", amount=6000)
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("save_entries", {"entries": [entry]})),
+        response(text_block("✅ Gasto guardado: Alimentación - $6,000 COP - Café en Starbucks")),
+    ]
+    history = first.history + [{"role": "user", "content": "6000"}]
+    second = agent.handle_message(history)
+
+    assert second.kind == "saved"
+    sheets_writer.write_expense.assert_called_once_with(entry)
