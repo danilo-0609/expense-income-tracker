@@ -4,18 +4,17 @@
 
 A Telegram bot that lets a user log expenses **and income** in natural language (in Spanish) and have them automatically categorized and appended to a Google Sheet via a Claude agent. Currency is fixed to Colombian Pesos (COP); all user-facing responses are in Spanish. A single unified Claude call classifies each message as an expense (`gasto`) or income (`ingreso`) and extracts the right fields for whichever it is — there is no separate command or bot flow for income.
 
-## Planned Architecture
+## Architecture
 
 ```
-User (Telegram) → Telegram Bot → C# API Endpoint → Claude Agent → Google Sheets (via MCP)
+User (Telegram) → Python Telegram Bot (Polling) → Claude Agent (Anthropic SDK) → Google Sheets (gspread, Service Account)
 ```
 
-- **Telegram Bot** — C# using the `Telegram.Bot` library. Listens for messages, forwards expense text to the API, and relays the confirmation/error back to the user.
-- **C# API** — ASP.NET Core (.NET 10). Single primary endpoint `POST /api/expenses` accepting `{ telegramUserId, expenseText }`. Calls the Claude API (Anthropic SDK for C#) with the expense text and the categorization system prompt, and returns the result to the bot.
-- **Claude Agent** — Receives the raw message (expense or income) plus a single unified system prompt encoding both expense and income categorization rules, decides the entry's `type` (`gasto` or `ingreso`), extracts structured fields (amount, description, category, date), and calls the Google Sheets MCP tool to append a row to the sheet for that type. It also composes the user-facing confirmation message.
-- **Google Sheets (via MCP)** — Persistence layer. No manual API key/credential handling — auth is OAuth2, managed by the MCP connector configured in Claude.ai settings. The agent appends rows to a monthly sheet with columns: `Fecha | Categoría | Descripción | Monto (COP) | Notas`. Expenses and income live in **separate** monthly sheets (e.g. `August/2026` for expenses, `Ingresos - August/2026` for income) — never mixed into the same tab or `Categoría` column, since the two use different category vocabularies.
+- **Telegram Bot** (`bot.py`, `main.py`) — Python, using `python-telegram-bot`. Polls Telegram for messages (no public URL/webhook needed), maintains a per-chat conversation history for clarification follow-ups, forwards message text to the Claude agent, and relays the confirmation/error back to the user. No separate API layer — the bot talks to Claude and Sheets directly in-process.
+- **Claude Agent** (`claude_agent.py`, `system_prompt.py`) — Calls the Anthropic API directly with the conversation history plus a single unified system prompt encoding both expense and income categorization rules. Decides each entry's `type` (`gasto` or `ingreso`), extracts structured fields (amount, description, category, date, notes), and returns NDJSON. It also composes the user-facing confirmation message. Off-topic input and prompt-injection attempts are flagged and short-circuited by the bot rather than saved.
+- **Google Sheets** (`sheets_writer.py`) — Persistence layer via `gspread` using a Service Account JSON key (`GOOGLE_SERVICE_ACCOUNT_PATH`) — no MCP, no OAuth2 flow. `SheetsWriter` appends rows to a monthly sheet with columns: `Fecha | Categoría | Descripción | Monto (COP) | Notas`. Expenses and income live in **separate** monthly sheets (e.g. `August/2026` for expenses, `Ingresos - August/2026` for income) — never mixed into the same tab or `Categoría` column, since the two use different category vocabularies. Sheets are created on demand if they don't exist yet.
 
-Because the domain logic (categorization, parsing, desglose of multi-item messages, expense-vs-income classification) lives in the Claude agent's system prompt rather than in C# code, most "business logic" changes for this project mean editing the agent's system prompt, not application code. See the full prompt templates in [specs/expense_tracker_design_plan.md](specs/expense_tracker_design_plan.md) and [specs/income_tracker_design_plan.md](specs/income_tracker_design_plan.md).
+Because the domain logic (categorization, parsing, desglose of multi-item messages, expense-vs-income classification) lives in the Claude agent's system prompt rather than in application code, most "business logic" changes for this project mean editing `system_prompt.py`, not the bot/writer code. See the full prompt templates in [specs/expense_tracker_design_plan.md](specs/expense_tracker_design_plan.md) and [specs/income_tracker_design_plan.md](specs/income_tracker_design_plan.md).
 
 ### Categorization rules
 
@@ -41,8 +40,8 @@ Income logging only covers discrete income **events** the user reports (salary p
   - Expenses: `"✅ Gasto guardado: [Categoría] - $[Monto] COP - [Descripción]"`
   - Income: `"✅ Ingreso guardado: [Categoría] - $[Monto] COP - [Descripción]"`
 
-## Security Notes (from plan)
+## Security Notes
 
-- Telegram bot token and Claude API key belong in environment variables (`.env`), never committed.
-- Google Sheets auth is handled entirely by the MCP OAuth2 flow — do not add manual credential/service-account handling for Sheets.
-- The API endpoint should validate the Telegram user ID and consider rate limiting, since it's an inbound webhook-style surface.
+- Telegram bot token, Claude API key, and the Google Service Account JSON path belong in environment variables (`.env`), never committed.
+- Google Sheets auth is a Service Account JSON key (`GOOGLE_SERVICE_ACCOUNT_PATH`), scoped to `spreadsheets` — no OAuth2/MCP flow, no manual token refresh needed.
+- The bot polls Telegram rather than exposing a webhook endpoint, so there's no inbound HTTP surface to validate/rate-limit; input trust boundary is the message text itself (see off-topic/prompt-injection guardrail in `off_topic_responses.py`).
