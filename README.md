@@ -348,7 +348,6 @@ See `specs/expense_tracker_design_plan.md` for deployment instructions.
 ## Future Features
 
 - Monthly expense/income summaries
-- Budget alerts per category
 - Recurring expense templates
 - Export to PDF
 - Analytics dashboard

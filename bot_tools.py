@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from claude_agent_tools import ToolCallingExpenseAgent
+from mcp_budget_client import McpBudgetClient
 from sheets_writer import SheetsWriter
 from off_topic_responses import OFF_TOPIC_RESPONSES
 
@@ -34,8 +35,14 @@ logger = logging.getLogger(__name__)
 class ToolCallingExpenseBot:
     """Telegram bot backed by the tool-calling agentic flow."""
 
-    def __init__(self, bot_token: str, claude_api_key: str, sheets_writer: SheetsWriter = None):
-        self.agent = ToolCallingExpenseAgent(claude_api_key, sheets_writer)
+    def __init__(
+        self,
+        bot_token: str,
+        claude_api_key: str,
+        sheets_writer: SheetsWriter = None,
+        mcp_client: McpBudgetClient = None,
+    ):
+        self.agent = ToolCallingExpenseAgent(claude_api_key, sheets_writer, mcp_client)
         # Per-chat pending conversation state, so follow-up replies to a
         # clarification question (e.g. a bare amount) have context. Each
         # entry is {"history": [...], "pending_tool_use_id": str | None} -
@@ -153,8 +160,24 @@ def main():
     else:
         logger.info("Google Sheets credentials not configured. Running in test mode.")
 
-    bot = ToolCallingExpenseBot(bot_token, claude_api_key, sheets_writer)
-    bot.run()
+    mcp_client = None
+    if sheets_id and os.path.exists(service_account_path):
+        mcp_client = McpBudgetClient()
+        try:
+            mcp_client.start()
+            logger.info("MCP budget-summary integration enabled")
+        except Exception as e:
+            logger.warning(f"MCP sheets server not available: {e}. Running without budget summaries.")
+            mcp_client = None
+    else:
+        logger.info("Google Sheets credentials not configured. Running without budget summaries.")
+
+    bot = ToolCallingExpenseBot(bot_token, claude_api_key, sheets_writer, mcp_client)
+    try:
+        bot.run()
+    finally:
+        if mcp_client is not None:
+            mcp_client.stop()
 
 
 if __name__ == "__main__":

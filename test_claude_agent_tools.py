@@ -212,6 +212,66 @@ def test_multiturn_clarification_followup_resolves_into_save_entries():
     sheets_writer.write_expense.assert_called_once_with(entry)
 
 
+def test_get_budget_summary_calls_mcp_client_and_returns_composed_text():
+    mcp_client = MagicMock()
+    budget_status = {
+        "month": "August", "year": 2026, "budget_configured": True,
+        "categories": [{"category": "Transporte", "spent": 220000, "budgeted": 200000, "pct_used": 110.0, "status": "over_budget"}],
+        "total_spent": 220000, "total_budget": 200000, "total_pct_used": 110.0,
+        "total_status": "over_budget", "total_income": 3000000,
+    }
+    mcp_client.get_budget_status.return_value = budget_status
+    agent = ToolCallingExpenseAgent("fake-claude-key", mcp_client=mcp_client)
+    agent.client = MagicMock()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("get_budget_summary", {}, tool_id="toolu_b1")),
+        response(text_block("Vas 110% en Transporte, por encima del presupuesto.")),
+    ]
+
+    result = agent.handle_message([], "¿cómo voy con el presupuesto?")
+
+    assert isinstance(result, AgentTurnResult)
+    assert result.kind == "summary"
+    assert result.text == "Vas 110% en Transporte, por encima del presupuesto."
+    mcp_client.get_budget_status.assert_called_once_with()
+
+    second_call_messages = agent.client.messages.create.call_args_list[1].kwargs["messages"]
+    tool_result_message = second_call_messages[-1]
+    tool_result_payload = json.loads(tool_result_message["content"][0]["content"])
+    assert tool_result_payload == budget_status
+    assert tool_result_message["content"][0]["tool_use_id"] == "toolu_b1"
+
+
+def test_get_budget_summary_without_mcp_client_still_composes_a_reply():
+    agent = ToolCallingExpenseAgent("fake-claude-key", mcp_client=None)
+    agent.client = MagicMock()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("get_budget_summary", {})),
+        response(text_block("No pude consultar el presupuesto en este momento.")),
+    ]
+
+    result = agent.handle_message([], "¿cómo voy con el presupuesto?")
+
+    assert result.kind == "summary"
+    assert result.text == "No pude consultar el presupuesto en este momento."
+
+
+def test_get_budget_summary_does_not_write_to_sheets():
+    sheets_writer = MagicMock()
+    mcp_client = MagicMock()
+    mcp_client.get_budget_status.return_value = {"budget_configured": False}
+    agent = ToolCallingExpenseAgent("fake-claude-key", sheets_writer=sheets_writer, mcp_client=mcp_client)
+    agent.client = MagicMock()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block("get_budget_summary", {})),
+        response(text_block("Todavía no tienes un presupuesto configurado.")),
+    ]
+
+    agent.handle_message([], "¿en qué estoy gastando de más?")
+
+    sheets_writer.write_expense.assert_not_called()
+
+
 def test_plain_followup_without_pending_clarification_is_sent_as_normal_text():
     agent = make_agent()
     agent.client.messages.create.side_effect = [

@@ -9,6 +9,7 @@ Claude for a second turn that composes the final confirmation.
 import json
 import logging
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Literal
 from dotenv import load_dotenv
 from anthropic import Anthropic
@@ -79,7 +80,22 @@ FLAG_OFF_TOPIC_TOOL = {
     },
 }
 
-TOOLS = [SAVE_ENTRIES_TOOL, ASK_CLARIFICATION_TOOL, FLAG_OFF_TOPIC_TOOL]
+GET_BUDGET_SUMMARY_TOOL = {
+    "name": "get_budget_summary",
+    "description": (
+        "Call this when the user is asking about their spending or budget "
+        "status for the current month (e.g. '¿cómo voy con el presupuesto?', "
+        "'¿en qué estoy gastando de más?', 'cuánto llevo gastado') rather than "
+        "reporting a new gasto/ingreso to log. Never call save_entries or "
+        "ask_clarification for a query like this - it takes no arguments."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
+TOOLS = [SAVE_ENTRIES_TOOL, ASK_CLARIFICATION_TOOL, FLAG_OFF_TOPIC_TOOL, GET_BUDGET_SUMMARY_TOOL]
 
 SHEETS_WRITE_ERROR = "error al escribir en la hoja de cálculo"
 NO_TOOL_CALL_ERROR = "❌ Error al procesar el mensaje. Por favor, intenta de nuevo."
@@ -89,14 +105,14 @@ NO_TOOL_CALL_ERROR = "❌ Error al procesar el mensaje. Por favor, intenta de nu
 class AgentTurnResult:
     """Outcome of one handle_message call.
 
-    kind: "saved" | "clarification" | "off_topic" | "error"
+    kind: "saved" | "clarification" | "off_topic" | "error" | "summary"
     text: the Spanish text to relay to the user (None for off_topic - the
         caller supplies its own canned reply).
     history: conversation history including any new assistant/tool turns, for
         the caller to persist across multi-turn clarification follow-ups.
     """
 
-    kind: Literal["saved", "clarification", "off_topic", "error"]
+    kind: Literal["saved", "clarification", "off_topic", "error", "summary"]
     text: str | None
     history: list[dict]
     pending_tool_use_id: str | None = None
@@ -105,9 +121,13 @@ class AgentTurnResult:
 class ToolCallingExpenseAgent:
     """Handles expense/income parsing and persistence via Claude tool calls."""
 
-    def __init__(self, api_key: str, sheets_writer=None):
+    def __init__(self, api_key: str, sheets_writer=None, mcp_client=None):
         self.client = Anthropic(api_key=api_key)
         self.sheets_writer = sheets_writer
+        # Sync-friendly client for mcp_sheets_server.py's get_budget_status
+        # tool (constructor-injected like sheets_writer, held for the bot's
+        # entire lifetime - see McpBudgetClient in mcp_budget_client.py).
+        self.mcp_client = mcp_client
 
     def handle_message(
         self, history: list[dict], user_message: str, pending_tool_use_id: str | None = None
@@ -163,6 +183,9 @@ class ToolCallingExpenseAgent:
         if tool_use.name == "save_entries":
             return self._save_entries(tool_use, history)
 
+        if tool_use.name == "get_budget_summary":
+            return self._get_budget_summary(tool_use, history)
+
         raise ValueError(f"Unknown tool call from Claude: {tool_use.name}")
 
     def _save_entries(self, tool_use, history: list[dict]) -> AgentTurnResult:
@@ -196,6 +219,31 @@ class ToolCallingExpenseAgent:
 
         return AgentTurnResult(kind="saved", text=confirmation_text, history=history)
 
+    def _get_budget_summary(self, tool_use, history: list[dict]) -> AgentTurnResult:
+        if self.mcp_client is not None:
+            budget_status = self.mcp_client.get_budget_status()
+        else:
+            budget_status = {"error": "El servicio de presupuesto no está disponible en este momento."}
+
+        history = history + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": json.dumps(budget_status, ensure_ascii=False),
+                    }
+                ],
+            }
+        ]
+
+        response = self._create_message(history)
+        summary_text = "".join(block.text for block in response.content if block.type == "text").strip()
+        history = history + [{"role": "assistant", "content": response.content}]
+
+        return AgentTurnResult(kind="summary", text=summary_text, history=history)
+
     def _create_message(self, history: list[dict]):
         return self.client.messages.create(
             model=MODEL,
@@ -204,3 +252,60 @@ class ToolCallingExpenseAgent:
             tools=TOOLS,
             messages=history,
         )
+
+
+def main():
+    """Manual smoke test against the real Claude API - not part of the
+    automated suite (LLM tool-choice isn't deterministic), useful for
+    exploring how reliably budget-status questions route to
+    get_budget_summary instead of being misrouted to save_entries or
+    ask_clarification. Mirrors claude_agent.py's main()."""
+    import os
+
+    api_key = os.getenv("CLAUDE_API_KEY")
+    if not api_key:
+        print("Error: CLAUDE_API_KEY environment variable not set")
+        return
+
+    mcp_client = SimpleNamespace(
+        get_budget_status=lambda: {
+            "month": "August", "year": 2026, "budget_configured": True,
+            "categories": [
+                {"category": "Transporte", "spent": 220000, "budgeted": 200000, "pct_used": 110.0, "status": "over_budget"},
+            ],
+            "total_spent": 220000, "total_budget": 200000, "total_pct_used": 110.0,
+            "total_status": "over_budget", "total_income": 3000000,
+        }
+    )
+    agent = ToolCallingExpenseAgent(api_key, mcp_client=mcp_client)
+
+    budget_query_cases = [
+        "¿cómo voy con el presupuesto?",
+        "¿en qué estoy gastando de más?",
+        "cuánto llevo gastado este mes",
+    ]
+    for test in budget_query_cases:
+        print(f"\n{'=' * 60}")
+        print(f"Budget query: {test}")
+        print("-" * 60)
+        result = agent.handle_message([], test)
+        print(f"kind={result.kind}")
+        print(result.text)
+        assert result.kind == "summary", f"Expected get_budget_summary routing for: {test}"
+
+    log_cases = [
+        "Almuerzo en Starbucks, 25000",
+        "Me pagaron el salario, 3000000",
+    ]
+    for test in log_cases:
+        print(f"\n{'=' * 60}")
+        print(f"Log entry: {test}")
+        print("-" * 60)
+        result = agent.handle_message([], test)
+        print(f"kind={result.kind}")
+        print(result.text)
+        assert result.kind != "summary", f"Expected save_entries routing, not get_budget_summary, for: {test}"
+
+
+if __name__ == "__main__":
+    main()

@@ -3,11 +3,11 @@
 import json
 import logging
 import os
-from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
+from sheet_naming import get_sheet_name
 
 # Load environment variables from .env file
 load_dotenv()
@@ -21,12 +21,6 @@ class SheetsWriter:
 
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
     HEADERS = ["Fecha", "Categoría", "Descripción", "Monto (COP)", "Notas"]
-    SHEET_NAME_PREFIXES = {"gasto": "", "ingreso": "Ingresos - "}
-    MONTH_NAMES = {
-        1: "January", 2: "February", 3: "March", 4: "April",
-        5: "May", 6: "June", 7: "July", 8: "August",
-        9: "September", 10: "October", 11: "November", 12: "December"
-    }
 
     def __init__(self, service_account_json_path: str, spreadsheet_id: str):
         """
@@ -59,15 +53,10 @@ class SheetsWriter:
         Returns:
             Sheet name like "August/2026" or "Ingresos - August/2026"
         """
-        prefix = self.SHEET_NAME_PREFIXES.get(entry_type, "")
-        try:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-            month_name = self.MONTH_NAMES[date_obj.month]
-            year = date_obj.year
-            return f"{prefix}{month_name}/{year}"
-        except (ValueError, KeyError):
+        sheet_name = get_sheet_name(date_str, entry_type)
+        if sheet_name.endswith("Other"):
             logger.error(f"Invalid date format: {date_str}. Using default sheet.")
-            return f"{prefix}Other"
+        return sheet_name
 
     def _get_or_create_sheet(self, sheet_name: str) -> gspread.Worksheet:
         """
