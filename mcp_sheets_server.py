@@ -12,7 +12,7 @@ be unit-tested without any live Sheets or MCP transport; the MCP tool wrapper
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 
 import gspread
 from dotenv import load_dotenv
@@ -31,6 +31,16 @@ PRESUPUESTO_SHEET_NAME = "Presupuesto"
 
 OVER_BUDGET_THRESHOLD = 100.0
 NEAR_LIMIT_THRESHOLD = 80.0
+
+MAX_HISTORICAL_RANGE_MONTHS = 12
+
+HISTORICAL_ROW_FIELD_MAP = {
+    "Fecha": "date",
+    "Categoría": "category",
+    "Descripción": "description",
+    "Monto (COP)": "amount",
+    "Notas": "notes",
+}
 
 
 def _status_for(pct_used: float) -> str:
@@ -142,6 +152,63 @@ def aggregate_budget_status(
     }
 
 
+def _months_between(start: date, end: date) -> list[tuple[int, int]]:
+    """Inclusive list of (year, month) pairs touched by [start, end]."""
+    months = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        months.append((year, month))
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return months
+
+
+def resolve_historical_range(
+    start_date: str, end_date: str, types: list[str]
+) -> tuple[dict | None, list[tuple[int, int]]]:
+    """
+    Validate a historical query's date range and resolve it to the calendar
+    months it touches, without doing any Sheets I/O.
+
+    Returns:
+        (error, months) - error is None on success (months then holds the
+        list of (year, month) pairs to read), or a JSON-serializable error
+        dict per the spec's documented error shapes (months is [] in that
+        case).
+    """
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return {
+            "error": "invalid_range",
+            "message": "start_date and end_date must be valid YYYY-MM-DD dates",
+        }, []
+
+    if start > end:
+        return {
+            "error": "invalid_range",
+            "message": "start_date must be on or before end_date",
+        }, []
+
+    months = _months_between(start, end)
+    if len(months) > MAX_HISTORICAL_RANGE_MONTHS:
+        return {"error": "range_too_large", "max_months": MAX_HISTORICAL_RANGE_MONTHS}, []
+
+    return None, months
+
+
+def _rows_in_range(rows: list[dict], start_date: str, end_date: str) -> list[dict]:
+    """Filter raw sheet rows to those dated within [start_date, end_date]
+    (both YYYY-MM-DD, safe to compare lexicographically) and remap their
+    Spanish column headers to the historical-entries output shape."""
+    matched = []
+    for row in rows:
+        row_date = row.get("Fecha", "")
+        if start_date <= row_date <= end_date:
+            matched.append({field: row.get(header, "") for header, field in HISTORICAL_ROW_FIELD_MAP.items()})
+    return matched
+
+
 class SheetsReader:
     """Thin gspread wrapper for the reads this server needs."""
 
@@ -181,6 +248,44 @@ def build_server(reader: SheetsReader) -> MCPServer:
         return aggregate_budget_status(
             month_name, today.year, budget_rows, expense_rows, income_rows
         )
+
+    @server.tool()
+    def get_historical_entries(start_date: str, end_date: str, types: list[str]) -> dict:
+        """Return raw expense/income rows (no aggregation) whose date falls
+        within [start_date, end_date], for the requested types. Ranges
+        spanning more than 12 calendar months are rejected."""
+        error, months = resolve_historical_range(start_date, end_date, types)
+        if error:
+            return error
+
+        months_missing = []
+        expenses = []
+        income = []
+        for year, month in months:
+            expense_sheet_name, income_sheet_name = get_month_sheet_names(month, year)
+
+            if "gasto" in types:
+                rows = reader.read_sheet_rows(expense_sheet_name)
+                if rows is None:
+                    months_missing.append(expense_sheet_name)
+                else:
+                    expenses.extend(_rows_in_range(rows, start_date, end_date))
+
+            if "ingreso" in types:
+                rows = reader.read_sheet_rows(income_sheet_name)
+                if rows is None:
+                    months_missing.append(income_sheet_name)
+                else:
+                    income.extend(_rows_in_range(rows, start_date, end_date))
+
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "requested_types": types,
+            "months_missing": months_missing,
+            "expenses": expenses,
+            "income": income,
+        }
 
     return server
 

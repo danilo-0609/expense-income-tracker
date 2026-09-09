@@ -272,6 +272,79 @@ def test_get_budget_summary_does_not_write_to_sheets():
     sheets_writer.write_expense.assert_not_called()
 
 
+def test_get_historical_entries_calls_mcp_client_with_parsed_args_and_composes_reply():
+    mcp_client = MagicMock()
+    historical_result = {
+        "start_date": "2026-08-01", "end_date": "2026-08-08",
+        "requested_types": ["gasto"], "months_missing": [],
+        "expenses": [{"date": "2026-08-08", "category": "Alimentación", "description": "Almuerzo", "amount": 25000, "notes": ""}],
+        "income": [],
+    }
+    mcp_client.get_historical_entries.return_value = historical_result
+    agent = ToolCallingExpenseAgent("fake-claude-key", mcp_client=mcp_client)
+    agent.client = MagicMock()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block(
+            "get_historical_entries",
+            {"start_date": "2026-08-01", "end_date": "2026-08-08", "types": ["gasto"]},
+            tool_id="toolu_h1",
+        )),
+        response(text_block("El 8 de agosto gastaste $25,000 COP en Alimentación (Almuerzo).")),
+    ]
+
+    result = agent.handle_message([], "¿qué gastos tuve el 8 de agosto?")
+
+    assert isinstance(result, AgentTurnResult)
+    assert result.kind == "history"
+    assert result.text == "El 8 de agosto gastaste $25,000 COP en Alimentación (Almuerzo)."
+    mcp_client.get_historical_entries.assert_called_once_with("2026-08-01", "2026-08-08", ["gasto"])
+
+    second_call_messages = agent.client.messages.create.call_args_list[1].kwargs["messages"]
+    tool_result_message = second_call_messages[-1]
+    tool_result_payload = json.loads(tool_result_message["content"][0]["content"])
+    assert tool_result_payload == historical_result
+    assert tool_result_message["content"][0]["tool_use_id"] == "toolu_h1"
+
+
+def test_get_historical_entries_without_mcp_client_still_composes_a_reply():
+    agent = ToolCallingExpenseAgent("fake-claude-key", mcp_client=None)
+    agent.client = MagicMock()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block(
+            "get_historical_entries",
+            {"start_date": "2026-08-01", "end_date": "2026-08-08", "types": ["gasto"]},
+        )),
+        response(text_block("No pude consultar el historial en este momento.")),
+    ]
+
+    result = agent.handle_message([], "¿qué gastos tuve el 8 de agosto?")
+
+    assert result.kind == "history"
+    assert result.text == "No pude consultar el historial en este momento."
+
+
+def test_get_historical_entries_does_not_write_to_sheets():
+    sheets_writer = MagicMock()
+    mcp_client = MagicMock()
+    mcp_client.get_historical_entries.return_value = {
+        "start_date": "2026-08-01", "end_date": "2026-08-08",
+        "requested_types": ["gasto"], "months_missing": [], "expenses": [], "income": [],
+    }
+    agent = ToolCallingExpenseAgent("fake-claude-key", sheets_writer=sheets_writer, mcp_client=mcp_client)
+    agent.client = MagicMock()
+    agent.client.messages.create.side_effect = [
+        response(tool_use_block(
+            "get_historical_entries",
+            {"start_date": "2026-08-01", "end_date": "2026-08-08", "types": ["gasto"]},
+        )),
+        response(text_block("No tienes gastos registrados el 8 de agosto.")),
+    ]
+
+    agent.handle_message([], "¿qué gastos tuve el 8 de agosto?")
+
+    sheets_writer.write_expense.assert_not_called()
+
+
 def test_plain_followup_without_pending_clarification_is_sent_as_normal_text():
     agent = make_agent()
     agent.client.messages.create.side_effect = [

@@ -92,6 +92,21 @@ class McpBudgetClient:
         result = future.result()
         return json.loads(result.content[0].text)
 
+    def get_historical_entries(self, start_date: str, end_date: str, types: list[str]) -> dict:
+        """Call the get_historical_entries MCP tool and return the parsed JSON payload.
+
+        Blocking - safe to call from synchronous code running on another thread.
+        """
+        future = asyncio.run_coroutine_threadsafe(
+            self._session.call_tool(
+                "get_historical_entries",
+                {"start_date": start_date, "end_date": end_date, "types": types},
+            ),
+            self._loop,
+        )
+        result = future.result()
+        return json.loads(result.content[0].text)
+
     def stop(self) -> None:
         """Tear down the MCP client session and terminate the subprocess."""
         if self._loop is None or self._thread is None:

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mcp_sheets_server import aggregate_budget_status, build_server
+from mcp_sheets_server import aggregate_budget_status, build_server, resolve_historical_range
 
 
 def budget_row(category, amount):
@@ -182,3 +182,158 @@ def test_get_budget_status_tool_treats_missing_expense_tab_as_zero_spend():
     by_category = {c["category"]: c for c in payload["categories"]}
     assert by_category["Alimentación"]["spent"] == 0
     assert payload["total_income"] == 0
+
+
+# --- resolve_historical_range -----------------------------------------------
+
+
+def test_resolve_historical_range_single_day_within_one_month():
+    error, months = resolve_historical_range("2026-08-08", "2026-08-08", ["gasto"])
+
+    assert error is None
+    assert months == [(2026, 8)]
+
+
+def test_resolve_historical_range_spans_a_year_boundary():
+    error, months = resolve_historical_range("2025-12-15", "2026-01-15", ["gasto"])
+
+    assert error is None
+    assert months == [(2025, 12), (2026, 1)]
+
+
+def test_resolve_historical_range_exactly_twelve_months_is_allowed():
+    error, months = resolve_historical_range("2026-01-01", "2026-12-31", ["gasto"])
+
+    assert error is None
+    assert len(months) == 12
+
+
+def test_resolve_historical_range_thirteen_months_is_rejected():
+    error, months = resolve_historical_range("2026-01-01", "2027-01-31", ["gasto"])
+
+    assert error == {"error": "range_too_large", "max_months": 12}
+    assert months == []
+
+
+def test_resolve_historical_range_start_after_end_is_rejected():
+    error, months = resolve_historical_range("2026-08-31", "2026-08-01", ["gasto"])
+
+    assert error == {
+        "error": "invalid_range",
+        "message": "start_date must be on or before end_date",
+    }
+    assert months == []
+
+
+def test_resolve_historical_range_unparseable_date_is_rejected():
+    error, months = resolve_historical_range("2026-08-32", "2026-08-31", ["gasto"])
+
+    assert error == {
+        "error": "invalid_range",
+        "message": "start_date and end_date must be valid YYYY-MM-DD dates",
+    }
+    assert months == []
+
+
+# --- get_historical_entries tool --------------------------------------------
+
+
+def test_get_historical_entries_tool_filters_rows_within_range_and_type():
+    reader = MagicMock()
+    reader.read_sheet_rows.side_effect = lambda name: {
+        "August/2026": [
+            {"Fecha": "2026-08-08", "Categoría": "Alimentación", "Descripción": "Almuerzo", "Monto (COP)": 25000, "Notas": ""},
+            {"Fecha": "2026-08-20", "Categoría": "Transporte", "Descripción": "Uber", "Monto (COP)": 15000, "Notas": ""},
+        ],
+    }.get(name)
+
+    server = build_server(reader)
+
+    payload = _call_tool(
+        server,
+        "get_historical_entries",
+        {"start_date": "2026-08-01", "end_date": "2026-08-10", "types": ["gasto"]},
+    )
+
+    assert payload["expenses"] == [
+        {"date": "2026-08-08", "category": "Alimentación", "description": "Almuerzo", "amount": 25000, "notes": ""}
+    ]
+    assert payload["income"] == []
+    assert payload["months_missing"] == []
+    assert payload["requested_types"] == ["gasto"]
+
+
+def test_get_historical_entries_tool_reports_missing_sheets_as_months_missing():
+    reader = MagicMock()
+    reader.read_sheet_rows.return_value = None
+
+    server = build_server(reader)
+
+    payload = _call_tool(
+        server,
+        "get_historical_entries",
+        {"start_date": "2026-08-01", "end_date": "2026-08-31", "types": ["gasto", "ingreso"]},
+    )
+
+    assert payload["expenses"] == []
+    assert payload["income"] == []
+    assert set(payload["months_missing"]) == {"August/2026", "Ingresos - August/2026"}
+
+
+def test_get_historical_entries_tool_only_reads_requested_types():
+    reader = MagicMock()
+    reader.read_sheet_rows.return_value = []
+
+    server = build_server(reader)
+
+    _call_tool(
+        server,
+        "get_historical_entries",
+        {"start_date": "2026-08-01", "end_date": "2026-08-31", "types": ["gasto"]},
+    )
+
+    reader.read_sheet_rows.assert_called_once_with("August/2026")
+
+
+def test_get_historical_entries_tool_splits_expenses_and_income_across_months():
+    reader = MagicMock()
+    reader.read_sheet_rows.side_effect = lambda name: {
+        "July/2026": [
+            {"Fecha": "2026-07-15", "Categoría": "Alimentación", "Descripción": "Cena", "Monto (COP)": 40000, "Notas": ""},
+        ],
+        "Ingresos - July/2026": [
+            {"Fecha": "2026-07-15", "Categoría": "Salario", "Descripción": "Salario de julio", "Monto (COP)": 3000000, "Notas": ""},
+        ],
+        "August/2026": [],
+        "Ingresos - August/2026": [],
+    }.get(name)
+
+    server = build_server(reader)
+
+    payload = _call_tool(
+        server,
+        "get_historical_entries",
+        {"start_date": "2026-07-01", "end_date": "2026-08-31", "types": ["gasto", "ingreso"]},
+    )
+
+    assert payload["expenses"] == [
+        {"date": "2026-07-15", "category": "Alimentación", "description": "Cena", "amount": 40000, "notes": ""}
+    ]
+    assert payload["income"] == [
+        {"date": "2026-07-15", "category": "Salario", "description": "Salario de julio", "amount": 3000000, "notes": ""}
+    ]
+    assert payload["months_missing"] == []
+
+
+def test_get_historical_entries_tool_returns_error_payload_for_invalid_range():
+    reader = MagicMock()
+    server = build_server(reader)
+
+    payload = _call_tool(
+        server,
+        "get_historical_entries",
+        {"start_date": "2026-08-31", "end_date": "2026-08-01", "types": ["gasto"]},
+    )
+
+    assert payload == {"error": "invalid_range", "message": "start_date must be on or before end_date"}
+    reader.read_sheet_rows.assert_not_called()

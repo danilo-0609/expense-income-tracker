@@ -95,7 +95,39 @@ GET_BUDGET_SUMMARY_TOOL = {
     },
 }
 
-TOOLS = [SAVE_ENTRIES_TOOL, ASK_CLARIFICATION_TOOL, FLAG_OFF_TOPIC_TOOL, GET_BUDGET_SUMMARY_TOOL]
+GET_HISTORICAL_ENTRIES_TOOL = {
+    "name": "get_historical_entries",
+    "description": (
+        "Call this when the user asks to see/list past expenses and/or income "
+        "for a stated period (a specific day, a named month, a relative range "
+        "like 'los últimos dos meses'), e.g. 'qué gastos tuve el 8 de agosto' "
+        "or 'cuáles fueron mis ingresos en los últimos dos meses'. Returns raw "
+        "entries only - never call this for a ranking/max/sum-style question "
+        "like 'cuál fue el día que más gasté', which isn't supported yet."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "start_date": {"type": "string", "description": "YYYY-MM-DD, inclusive"},
+            "end_date": {"type": "string", "description": "YYYY-MM-DD, inclusive"},
+            "types": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["gasto", "ingreso"]},
+                "minItems": 1,
+                "description": "Which entry types to include - explicitly decide from the question's wording, never default to both.",
+            },
+        },
+        "required": ["start_date", "end_date", "types"],
+    },
+}
+
+TOOLS = [
+    SAVE_ENTRIES_TOOL,
+    ASK_CLARIFICATION_TOOL,
+    FLAG_OFF_TOPIC_TOOL,
+    GET_BUDGET_SUMMARY_TOOL,
+    GET_HISTORICAL_ENTRIES_TOOL,
+]
 
 SHEETS_WRITE_ERROR = "error al escribir en la hoja de cálculo"
 NO_TOOL_CALL_ERROR = "❌ Error al procesar el mensaje. Por favor, intenta de nuevo."
@@ -112,7 +144,7 @@ class AgentTurnResult:
         the caller to persist across multi-turn clarification follow-ups.
     """
 
-    kind: Literal["saved", "clarification", "off_topic", "error", "summary"]
+    kind: Literal["saved", "clarification", "off_topic", "error", "summary", "history"]
     text: str | None
     history: list[dict]
     pending_tool_use_id: str | None = None
@@ -186,6 +218,9 @@ class ToolCallingExpenseAgent:
         if tool_use.name == "get_budget_summary":
             return self._get_budget_summary(tool_use, history)
 
+        if tool_use.name == "get_historical_entries":
+            return self._get_historical_entries(tool_use, history)
+
         raise ValueError(f"Unknown tool call from Claude: {tool_use.name}")
 
     def _save_entries(self, tool_use, history: list[dict]) -> AgentTurnResult:
@@ -243,6 +278,33 @@ class ToolCallingExpenseAgent:
         history = history + [{"role": "assistant", "content": response.content}]
 
         return AgentTurnResult(kind="summary", text=summary_text, history=history)
+
+    def _get_historical_entries(self, tool_use, history: list[dict]) -> AgentTurnResult:
+        if self.mcp_client is not None:
+            historical_result = self.mcp_client.get_historical_entries(
+                tool_use.input["start_date"], tool_use.input["end_date"], tool_use.input["types"]
+            )
+        else:
+            historical_result = {"error": "El servicio de historial no está disponible en este momento."}
+
+        history = history + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": json.dumps(historical_result, ensure_ascii=False),
+                    }
+                ],
+            }
+        ]
+
+        response = self._create_message(history)
+        summary_text = "".join(block.text for block in response.content if block.type == "text").strip()
+        history = history + [{"role": "assistant", "content": response.content}]
+
+        return AgentTurnResult(kind="history", text=summary_text, history=history)
 
     def _create_message(self, history: list[dict]):
         return self.client.messages.create(

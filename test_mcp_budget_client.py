@@ -22,6 +22,17 @@ FAKE_SERVER_SOURCE = textwrap.dedent(
     def get_budget_status() -> dict:
         return {"budget_configured": True, "total_income": 1}
 
+    @server.tool()
+    def get_historical_entries(start_date: str, end_date: str, types: list) -> dict:
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "requested_types": types,
+            "months_missing": [],
+            "expenses": [],
+            "income": [],
+        }
+
     if __name__ == "__main__":
         server.run(transport="stdio")
     """
@@ -41,6 +52,23 @@ def test_start_connects_and_get_budget_status_round_trips(fake_server_script):
     try:
         result = client.get_budget_status()
         assert result == {"budget_configured": True, "total_income": 1}
+    finally:
+        client.stop()
+
+
+def test_get_historical_entries_round_trips(fake_server_script):
+    client = McpBudgetClient(server_script=fake_server_script)
+    client.start()
+    try:
+        result = client.get_historical_entries("2026-08-01", "2026-08-31", ["gasto"])
+        assert result == {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-31",
+            "requested_types": ["gasto"],
+            "months_missing": [],
+            "expenses": [],
+            "income": [],
+        }
     finally:
         client.stop()
 
